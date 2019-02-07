@@ -1,4 +1,4 @@
-function finish = spatialGut(model, options, solverParam)
+function spatialGut(model, options, solverParam)
 % finish = spatialGut(model, options, solverParam)
 %***Simplify the diffusion process into simple oxygen flux proportional to
 %surface area and diffusion coefficients
@@ -8,7 +8,7 @@ function finish = spatialGut(model, options, solverParam)
 %Input:
 %  model:    COBRA community model (template for all communities)
 %  options: structure with the following fields:
-%     C0:  mCom x 2 x nCond array. c_ijk is the amount of metabolites (mmol) 
+%     C:  mCom x 2 x nCond array. c_ijk is the amount of metabolites (mmol) 
 %         for the i-th community metabolites in the mucsoal (j=1) or
 %         luminal (j=2) community under the k-th condition representing 
 %         a section of the intestines.
@@ -28,7 +28,7 @@ function finish = spatialGut(model, options, solverParam)
 %        (oxygen available to each community calculated by summing the concentration
 %         multiplied by the volume occupied by the community over each region
 %         in the discretization scheme)
-%     saveDsteady: filename for saving
+%     saveName: filename for saving
 %     saveFre: steps per savefile
 %     O2Id: oxygen community metabolite ID (o2[u])
 %     O2d: nCond x 1 vector of oxygen diffusion coefficients between mucosal and
@@ -58,18 +58,11 @@ function finish = spatialGut(model, options, solverParam)
 %community is negligible.
 
 %% Check inputs
-debug = 0;
-finish = true;
 tReal = tic;
 tol = 1e-10;        
-param2get = {'resultTmp','dtMuc','dtLum','dtOxy','C0','T','D','X','O2mucLv','Len',...
-    'O2Id','Rmuc','RmucCom','R','L','O2s','O2d','saveName','saveFre', ...
-    'O2ut', 'O2total','O2fluxMuc','O2fluxLum',...
-    'Kpc','pO2','p2c'};
-eval(sprintf('[%s] = getCobraComParams(param2get, options, model);', ...
-            strjoin(param2get, ',')...
-            )...
-    );
+[resultTmp, dtMuc, dtLum, C, T, X, saveName, saveFre, O2Id, O2fluxMuc, O2fluxLum, nSim] = ...
+    getSpatialGutParams({'resultTmp','dtMuc','dtLum','C','T','X','saveName','saveFre', ...
+    'O2Id','O2fluxMuc','O2fluxLum','nSim'}, options, model);
 if nargin < 3
     solverParam = struct();
 end
@@ -81,7 +74,7 @@ if ~isempty(saveDir) && ~exist(saveDir, 'dir')
     mkdir(saveDir)
 end
 % check if necessary parameters are provided
-field = {'C0','T','X'};
+field = {'C', 'T', 'X', 'O2fluxMuc', 'O2fluxLum'};
 for j = 1:numel(field)
     if ~isfield(options,field{j})
         error('%s must be provided in the option structure.',field{j});
@@ -89,8 +82,8 @@ for j = 1:numel(field)
 end
 % number of community metabolites
 nCom = size(model.infoCom.Mcom, 1);
-if numel(C0) ~= nCom
-    error('Size of options.C0 (%d) not equal to the number of community metabolites (%d).', numel(C0), nCom);
+if numel(C) ~= nCom
+    error('Size of options.C (%d) not equal to the number of community metabolites (%d).', numel(C), nCom);
 elseif numel(X) ~= numel(T)
     error('Size of options.X not equal to size of options.T, which is the number of sections in the intestines to be simulated.');
 end
@@ -119,37 +112,24 @@ o2utLum = zeros(2,nStepLum,saveFre);
 % flux from resMuc may need rescaling after optimization. Record separately.
 fluxMuc = zeros(size(model.S,2),saveFre);
 % time at which the result was got
-[time,o2Muc] = deal(zeros(saveFre,1));
+time = zeros(saveFre,1);
 timeLum = zeros(nStepLum,saveFre); 
 % metabolite level
-[Ct] = deal(zeros(size(C0,1), nStepLum, saveFre));
+[Ct] = deal(zeros(size(C,1), nStepLum, saveFre));
 
 % biomass (relative abundance)
 Xmuc = zeros(nSp, saveFre);
 [Xlum,optOrder] = deal(zeros(nSp, nStepLum, saveFre));
-%whether the species is dying
+% whether the species is dying (if it is not growing and cannot satisfy non-growth associated ATP maintenance
 dying = false(nSp, nStepLum, saveFre);
 
-%%%%%%%%%%%%%
-% Need to recalculate SteadyCom or not
-SC = false(saveFre,1);
-%Volume of discretization region in each section
-Volume = zeros(L, nSect);
-%width of each region 
-dr = zeros(nSect,1);
-%volume ratio occupied by either community in each discretization region
-%ratioMuc is the volume ratio in a region with constant oxygen pressure
-[ratioMucCom, ratioLumCom, ratioMuc] = deal(zeros(L,nSect));
-[O2sMuc,O2sLum] = deal(zeros(nSect,1));
-
+% Solve SteadyCom or not in each step (if the uptake condition remains the same, no need)
+scSolve = false(saveFre,1);
+scFinish = true(saveFre, 1);
 
 %Variabile for the current step
 %nothing in the lumen initially
 XlumCur = zeros(nSp,1);
-
-%oxygen concentration profile for calculating diffusion (mmol per unit area)
-%assume uniform distribution at the beginning
-o2ProfileCur = zeros(L,1);
 
 %O2 level capture by the two specific variables o2MucCur and o2LumCur
 C(O2) = 10000;
@@ -166,38 +146,16 @@ ubMucPrev = inf(nCom,1);
 %options
 [optionsMuc, optionsLum] = deal(options);
 
-%calculate the physical parameters first
-for j = 1:nSect
-    %discretization step size for oxygen diffusion
-    dr(j) = R(j) / L;
-    Volume(:,j) = 2*pi*dr(j)*((dr(j):dr(j):R(j))-(dr(j)/2))';
-    %for calculating total amount of oxygen available to each community
-    ratioMucCom(L:-1:(L-ceil(RmucCom(j)/dr(j))+1),j) = 1;
-    ratioLumCom(1:ceil((R(j)-RmucCom(j))/dr(j)),j) = 1;
-    %for identifying the region with constant oxygen pressure
-    ratioMuc(dr(j):dr(j):R(j) >= R(j)-Rmuc(j)+dr(j),j) = 1;
-    if mod(RmucCom(j),dr(j)) > 0
-        areaOut = (((L-ceil(RmucCom(j)/dr(j))+1)*dr(j))^2)*pi - ((R(j)-RmucCom(j))^2)*pi;
-        ratioMucCom(L-ceil(RmucCom(j)/dr(j))+1,j) = areaOut/Volume(L-ceil(RmucCom(j)/dr(j))+1,j);
-    end
-    if mod(R(j)-RmucCom(j),dr(j)) > 0
-        areaIn = (R(j)-RmucCom(j))^2*pi - (floor((R(j)-RmucCom(j))/dr(j))*dr(j))^2*pi;
-        ratioLumCom(ceil((R(j)-RmucCom(j))/dr(j)),j) = areaIn / Volume(ceil((R(j)-RmucCom(j))/dr(j)),j);
-    end
-    %for calculating diffusion from epithelial cells to region R(L) 
-    O2sMuc(j) = O2s(j) * ratioMucCom(L,j);
-    O2sLum(j) = O2s(j) * ratioLumCom(L,j);
-end
-
+%% Detect previous saved progress if any
 j0 = 0;
-[kTotal0,kStep0] = deal(1);
+[kTotal0, kStep0] = deal(1);
 kSave0 = 0;
 while true
     if exist(sprintf(['%s_sect%dsave%0' num2str(digit) 'd.mat'], ...
-            saveDsteady, j0, kSave0+1), 'file')
+            saveName, j0, kSave0+1), 'file')
         kSave0 = kSave0 + 1;
     elseif exist(sprintf(['%s_sect%dsave%0' num2str(digit) 'd.mat'], ...
-            saveDsteady, j0+1, 1), 'file')
+            saveName, j0+1, 1), 'file')
         j0 = j0 + 1;
         kSave0 = 0;
     else
@@ -209,7 +167,7 @@ if kSave0 > 0 || j0 >= 1
     while j0 >= 1
         try
             load(sprintf(['%s_sect%dsave%0' num2str(digit) 'd.mat'], ...
-                saveDsteady, j0, kSave0),'t','XlumCur','C', ...
+                saveName, j0, kSave0),'t','XlumCur','C', ...
                 'j0','kTotal0','kSave0','nextJ','resMuc','kStep0');
             break
         catch ME
@@ -221,12 +179,13 @@ if kSave0 > 0 || j0 >= 1
         kStepPrev = kStep0;
         kTotal = kTotal0 + 1;
         if nextJ
+            % if solving for the next intestinal section
             j0 = j0 + 1;
             kSave0 = 1;
         else
             kSave0 = kSave0 + 1;
         end
-        dataPrev = load(sprintf('%s_pre.mat', saveDsteady),'SpRate','SpRateUt','SpRateEx');
+        dataPrev = load(sprintf('%s_pre.mat', saveName),'SpRate','SpRateUt','SpRateEx');
         Id = findRxnIDs(model,dataPrev.SpRate);
         model.lb(Id) = dataPrev.SpRateUt;
         model.ub(Id) = dataPrev.SpRateEx;
@@ -239,99 +198,53 @@ if j0 == 0
     SpRate = model.rxns(model.EXsp(model.EXsp~=0));
     SpRateUt = model.lb(model.EXsp(model.EXsp~=0));
     SpRateEx = model.ub(model.EXsp(model.EXsp~=0));
-    save(sprintf('%s_pre.mat', saveDsteady), 'options','solverParam',...
-        'SpRate','SpRateUt','SpRateEx','nStepLum','nStepOxy','dtMuc','dtLum',...
-        'digit','Nstep','feasTol','tol','exFact', ...
-        'Volume','dr','ratioMuc','ratioMucCom','ratioLumCom','O2sMuc','O2sLum','R','Rmuc','L',...
-        'O2ut','RmucCom','pO2','Kpc','p2c','Len','O2fluxMuc','O2fluxLum');
+    save(sprintf('%s_pre.mat', saveName), 'options','solverParam',...
+        'SpRate', 'SpRateUt', 'SpRateEx', 'nStepLum', 'dtMuc', 'dtLum',...
+        'digit', 'Nstep', 'feasTol', 'tol', 'O2fluxMuc', 'O2fluxLum');
     clear SpRate SpRateUt SpRateEx
 end
+
+%% Simulate the mucosal microbiota
 init = true;
-fprintf('Start from section %d, save %d...\n',j0,kSave0);
+fprintf('Sim #%d. Start from section %d, save %d...\n', nSim, j0,kSave0);
+% for each section in the intestines
 for j = j0:nSect
-    %mucosal and luminal o2 level defined by oxygen concentration
-    if nextJ
-        if 0
-            if j == 1
-                o2ProfileCur(ratioMuc(:,j) > 0) = O2mucLv(j);
-            else
-                %O2 from mucosal layer
-                o2ProfileCurMuc = zeros(L,1);
-                o2ProfileCurMuc(ratioMuc(:,j) > 0) = O2mucLv(j);
-                %O2 from lumen.
-                %total O2 amount in each region
-                weight = o2ProfileCur .* Volume(:,j-1) .* ratioLum(:,j-1);
-                %Ensure continuity of total oxygen in the lumen. Assume the
-                %same amount in the new corresponding region (same l = 1, 2, ..., L)
-                o2ProfileCurLum = weight ./ Volume(:,j);
-                %if the boundary between mucosal layer and the lumen lies in
-                %a discretization region for the new section. Ignore the
-                %contribution of O2 from the lumen for simplicity because that
-                %region has been assumed to have constant O2 level
-                o2ProfileCurLum(ratioMuc(:,j) > 0) = 0;
-                o2ProfileCur = o2ProfileCurMuc + o2ProfileCurLum;
-            end
-        else
-            %simply reset oxygen level
-            o2ProfileCur = zeros(L,1);
-            o2ProfileCur(ratioMuc(:,j) > 0) = pO2(j);
-        end
-    end
-    %average partial pressure
-    o2MucCur = sum(o2ProfileCur .* Volume(:,j) .* ratioMucCom(:,j)) / sum(Volume(:,j) .* ratioMucCom(:,j));
-    o2LumCur = sum(o2ProfileCur .* Volume(:,j) .* ratioLumCom(:,j)) / sum(Volume(:,j) .* ratioLumCom(:,j));
+    
     %counter for step and number of save files
     kStep = 1;
     if init
+        % first run of the current call of the function. Start with the detected latest saved progress
         kSave = kSave0;
         init = false;
     else
+        % >= 2nd run of the current call. Start with the save file #1
         kSave = 1;
     end
-    %[kStep,kSave] = deal(1);
     
-    %record the initial values
-    [time(kStep),o2Muc(kStep)] = deal(t,o2MucCur);
-
-    optionsMuc.BMweight = X(j) * sum(Volume(:,j).*ratioMucCom(:,j)) * Len(j) /(100^3) ;
-    %     optionsMuc.BMcon = ones(1,nSp);
-    %     optionsMuc.BMrhs = 2 * X(j);
-    %     optionsMuc.BMcsense = 'L';
-    
+    % store the initial time
+    time(kStep) = t;
+    % assign the mucosal microbial biomass
+    optionsMuc.BMweight = X(j);
     %simulation time for the current section
     maxT = sum(T(1:j)) - dtMuc * 1e-5;
+    
     while true
-        %availability profile
-%         availMuc = C > 0 & metPossUT;
-%         availMuc(O2) = o2MucCur > 1e-5 & metPossUT(O2);
-        %%%   unlimited community uptake rate. Uptake rate should be bounded at
-        %%%   the organism level
-        %Maximum specific uptake rate by organism
-        o2ubSp = -abs(O2ut * o2MucCur);
-        %maximum community uptake rate
-        o2ub = abs(O2total(j) * optionsMuc.BMweight * o2MucCur);
-        o2ub = min([o2ub, o2MucCur * p2c * sum(Volume(:,j) .* ratioMucCom(:,j)) * Len(j) / dtMuc / 1e6]);
-        %o2ubMuc(:,kStep) = [o2ub; o2ubSp(:)];
-        o2utMuc(1,kStep) = O2fluxMuc(j); %* optionsMuc.BMweight;
-        ubMucCur = min(10000*ones(nCom,1),C./dtMuc);
-        %         ubMucCur(O2) = min([10000, o2MucCur/dtMuc]);
-        ubMucCur(O2) = 10000;
+        % store the O2 uptake bound
+        o2utMuc(1,kStep) = O2fluxMuc(j);
+        % community uptake bounds for the mucosal microbiota
+        ubMucCur = min(10000 * ones(nCom, 1), C./dtMuc);
+        % 
+        ubMucCur(O2) = O2fluxMuc(j);
         ubMucCur(ubMucCur < feasTol) = 0; %may cause numerical problem for such small ub
-        ubDiff = abs(ubMucCur-ubMucPrev);
+        % difference in uptake bounds
+        ubDiff = abs(ubMucCur - ubMucPrev);
         if ~(isequal(ubMucCur ~= 0, ubMucPrev ~= 0)) || sum(ubDiff(ubMucPrev ~= 0) ./ ubMucPrev(ubMucPrev ~= 0)) > 0.01
             model.ub(model.EXcom(:,1)) = ubMucCur;
-            %model.lb(model.EXsp(O2,model.EXsp(O2,:)~=0)) = o2ubSp(model.EXsp(O2,:)~=0);
-            %model.ub(model.EXcom(O2,1)) = o2ub;
-            model.ub(model.EXcom(O2,1)) = O2fluxMuc(j);% * optionsMuc.BMweight;
-            SC(kStep) = true;
-            %perform steadyCom
-            if debug
-                fprintf('optimizeCbModelComCplexNewMC2:\n')
-            end
-            [~,resMuc(kStep)] = optimizeCbModelComCplexNewMC2(model, optionsMuc, solverParam);
-%             [~,resMuc(kStep)] = SteadyCom(model, optionsMuc, solverParam);
-            if strcmp(resMuc(kStep).stat,'time limit exceeded') || strcmp(resMuc(kStep).stat,'infeasible')
-                finish = false;
+            % there are differences. Solve SteadyCom
+            scSolve(kStep) = true;
+            [~, resMuc(kStep)] = SteadyCom(model, optionsMuc, solverParam);
+            if ~strcmp(resMuc(kStep).stat,'optimal')
+                scFinish(kStep) = false;
                 resMuc(kStep).Ex = zeros(nCom,1);
                 resMuc(kStep).Ut = zeros(nCom,1);
                 resMuc(kStep).GRmax = zeros(nSp,1);
@@ -339,122 +252,106 @@ for j = j0:nSect
                 resMuc(kStep).vBM = zeros(nSp,1);
                 resMuc(kStep).flux = zeros(n,1);
             end
-            %scale the optimal solution
             if sum(resMuc(kStep).BM) > 0
+                % scale the optimal solution
                 XmucCur = resMuc(kStep).BM * optionsMuc.BMweight  / sum(resMuc(kStep).BM);
                 fluxMuc(:,kStep) = resMuc(kStep).flux * optionsMuc.BMweight / sum(resMuc(kStep).BM);
             else
-                %this means an infeasible growth for the mucosal community,
-                %which should not happen in realistic gut microbiota.
-                %The model parameters for the simulation are probably too
-                %restrictive.
+                % infeasible growth for the mucosal community, which should not happen in realistic gut microbiota.
+                % The model parameters for the simulation are probably too restrictive.
                 XmucCur = zeros(nSp,1);
                 fluxMuc(:,kStep) = 0;
             end
-             
-            %         if isfield(optionsJ,'X')
-            %             optionsJ.BMweight = X(j);
-            %             [~,resMuc(j),LP] = optimizeCbModelComCplexNewMC2(model, optionsJ, solverParam);
-            %         else
-            %             optionsJ.GR = D(j);
-            %             [~,resMuc(j),LP] = optimizeCbModelComCplexFixGr(model,optionsJ, solverParam);
-            %         end
         else
+            % no difference in uptake bounds. Use the previous solution
             if kStep == 1
                 if kSave == 1
-                    %must be a new section
-                    fprintf('nCR: %d\.%d\n', options.nCR(1), options.nCR(2));
+                    % the first save file
+                    fprintf('Sim $%d:\n', nSim);
                     resMuc(kStep) = resMuc(kStepPrev);
                     fluxMuc(:,kStep) = fluxMuc(:,kStepPrev);
                 else
+                    % new save file
                     resMuc(kStep) = resMuc(saveFre);
                     fluxMuc(:,kStep) = fluxMuc(:,saveFre);
                 end
             else
+                % not a new save file, just use the previous solution
                 resMuc(kStep) = resMuc(kStep - 1);
                 fluxMuc(:,kStep) = fluxMuc(:,kStep-1);
             end
             if sum(resMuc(kStep).BM) > 0
+                % current biomass composition of the mucosal microbiota
                 XmucCur = resMuc(kStep).BM * optionsMuc.BMweight  / sum(resMuc(kStep).BM);
             else
                 XmucCur = zeros(nSp,1);
             end
         end
+        
+        if any(isnan(XmucCur * resMuc(kStep).GRmax * dtLum))
+            error('Sim #%d: Error in predicting growth in the mucosal microbiota!', nSim);
+        end
+        
+        % store the current uptake bounds for comparison at the next iteration
         ubMucPrev = ubMucCur;
+        % store the mucosal biomass composition
         Xmuc(:,kStep) = XmucCur;
+        % store the actual oxygen uptake by the mucosal microbiota
         o2utMuc(2,kStep) = fluxMuc(model.EXcom(O2,1),kStep) - fluxMuc(model.EXcom(O2,2),kStep);
-        %concentration change vector. Actuate in each dtLum step
+        % concentration change vector. Actuate in each dtLum step
         C_changeByMuc = fluxMuc(model.EXcom(:,2),kStep) - fluxMuc(model.EXcom(:,1),kStep);
         C_changeByMuc(O2) = 0;
-        %ignore oxygen change in mucosal community. Assume neglegible
-        %concentration vector appears to the luminal community (but not the
-        %actual recorded concentration
-        %Use linear change because the biomass of mucosal community is constant
+        % Concentration vector after exchanges by the mucosal microbiota.
+        % Use linear change because the biomass of mucosal community is constant
         Cmuc = C + C_changeByMuc * dtMuc;
         Cmuc(Cmuc < tol) = 0;
         
+        %% Simulate the luminal microbiota
         kStepLum = 1;
+        % store the current luminal microbial biomass composition
         Xlum(:,kStepLum,kStep) = XlumCur;
+        % store the concentration vector in each step
         Ct(:,kStepLum,kStep) = C;
+        % store the simulation time
         tLum = t;
         timeLum(kStepLum, kStep) = tLum;
         
         while true
-            %luminal community
-            model.ub(model.EXcom(:,1)) = min([10000*ones(nCom,1),C/dtLum, Cmuc/dtLum],[],2);
-            %model.ub(model.EXcom(O2,1)) = min([10000, o2LumCur/dtLum]);
-            %model.ub(model.EXcom(O2,1)) = 10000;
-            %Maximum specific uptake rate by organism
-            o2ubSp = -abs(O2ut * o2LumCur);
-            %maximum community uptake rate
-            o2ub = abs(O2total(j) * sum(XlumCur) * o2LumCur);
-            o2ub = min([o2ub, o2LumCur * p2c * sum(Volume(:,j) .* ratioLumCom(:,j)) * Len(j) / dtLum / 1e6]);
-            %o2utLum(:,kStepLum,kStep) = [o2ub; o2ubSp(:)];
-            o2utLum(1,kStepLum,kStep) = O2fluxLum(j);% * sum(XlumCur);
-            %model.lb(model.EXsp(O2,model.EXsp(O2,:)~=0)) = o2ubSp(model.EXsp(O2,:)~=0);
-            %model.ub(model.EXcom(O2,1)) = O2fluxLum(j) * sum(XlumCur);
-            %model.ub(model.EXcom(model.ub(model.EXcom(:,1)) < feasTol, 1)) = 0;%may cause numerical problem for such small ub
-            optionsLum.BMfix = XlumCur;
+            % oxygen uptake bounds
+            o2utLum(1,kStepLum,kStep) = O2fluxLum(j);
+            % random order for the organisms in running DMMM
             optOrder(:,kStepLum,kStep) = randperm(nSp)';
-             %O2 consumed by the luminal community
+            % O2 consumed by the luminal community
             o2consume = 0;
-            %%%%%%%%
-            %%% Use DMMM approach
-            %metabolite changed by mucosal community 
+            % update concentration vector due to exchanges by the mucosal community 
             C = C + C_changeByMuc * dtLum;
+            % increase in luminal microbial biomass
             dXlum = zeros(nSp,1);
+            % Run DMMM
             for jSpCt = 1:nSp
                 jSp = optOrder(jSpCt,kStepLum,kStep);
                 if XlumCur(jSp) > 0
-                    modelJ = killSpecies(model, setdiff(1:nSp,jSp));
-                    modelJ.ub(modelJ.EXcom(:,1)) = min([10000*ones(nCom,1),C/dtLum, Cmuc/dtLum],[],2);
-                    modelJ.ub(model.EXcom(O2,1)) = O2fluxLum(j);% * sum(XlumCur);
-                    modelJ.ub(modelJ.EXcom(modelJ.ub(modelJ.EXcom(:,1)) < feasTol, 1)) = 0;
-                    if debug
-                        fprintf('optimizeCbModelComCplexFixBMwoSS:\n')
-                    end
-                    [~, resLum(jSp,kStepLum,kStep)] = optimizeCbModelComCplexFixBMwoSS(modelJ,optionsLum, solverParam);
+                    % shut down other members
+                    modelJ = killSpecies(model, setdiff(1:nSp, jSp));
+                    % uptake bounds
+                    modelJ.ub(modelJ.EXcom(:, 1)) = min([10000 * ones(nCom, 1), C / dtLum, Cmuc / dtLum], [], 2);
+                    modelJ.ub(model.EXcom(O2, 1)) = O2fluxLum(j);
+                    modelJ.ub(modelJ.EXcom(modelJ.ub(modelJ.EXcom(:, 1)) < feasTol, 1)) = 0;
+                    [~, resLum(jSp, kStepLum, kStep)] = optimizeCbModelFixBm(modelJ, XlumCur, 1, solverParam);
                     if strcmp(resLum(jSp,kStepLum,kStep).stat,'infeasible')
                         dying(jSp,kStepLum,kStep) = true;
-                        %if infeasible, find maximum biomass sustainable.
-                        %Other assume dead.
+                        % if infeasible, find maximum biomass sustainable.
                         optionsLumSp = optionsLum;
                         optionsLumSp.GR = 0;
                         optionsLumSp.BMcon = sparse(1:nSp,1:nSp,ones(nSp,1),nSp,nSp);
                         optionsLumSp.BMcon(jSp,:) = [];
                         optionsLumSp.BMrhs = zeros(nSp-1,1);
                         optionsLumSp.BMcsense = char('E'*ones(1,nSp-1));
-                        if isfield(options,'nCR')
-                            optionsLumSp.nCR = options.nCR;
-                        end
-                        if debug
-                            fprintf('optimizeCbModelComCplexFixGr:\n')
-                        end
-                        [~, resFixGr] = optimizeCbModelComCplexFixGr(modelJ,optionsLumSp, solverParam);
-                        resFixGr.GRmax = zeros(nSp,1);
-                        resLum(jSp,kStepLum,kStep) = resFixGr;
-                        if resLum(jSp,kStepLum,kStep).BM(jSp) > XlumCur(jSp)
-                            resLum(jSp,kStepLum,kStep).flux = resLum(jSp,kStepLum,kStep).flux ...
+                        [~, resFixGr] = optimizeCbModelFixGr(modelJ, optionsLumSp, solverParam);
+                        resFixGr.GRmax = zeros(nSp, 1);
+                        resLum(jSp, kStepLum, kStep) = resFixGr;
+                        if resLum(jSp, kStepLum, kStep).BM(jSp) > XlumCur(jSp)
+                            resLum(jSp, kStepLum, kStep).flux = resLum(jSp, kStepLum, kStep).flux ...
                                 * XlumCur(jSp) / resLum(jSp,kStepLum,kStep).BM(jSp); 
                             resLum(jSp,kStepLum,kStep).Ut = resLum(jSp,kStepLum,kStep).Ut ...
                                 * XlumCur(jSp) / resLum(jSp,kStepLum,kStep).BM(jSp);
@@ -464,29 +361,20 @@ for j = j0:nSect
                         end
                         dXlum(jSp) = resLum(jSp,kStepLum,kStep).BM(jSp) - XlumCur(jSp);
                         if dXlum(jSp) > 1e-8
-                            error('Current amount of biomass should be unsustainable.');
+                            error('Sim #%d: Current amount of luminal biomass should be unsustainable.', nSim);
                         end
-                        %resLum(jSp,kStepLum,kStep).Ex = zeros(nCom,1);
-                        %resLum(jSp,kStepLum,kStep).Ut = zeros(nCom,1);
-                        %resLum(jSp,kStepLum,kStep).GRmax = zeros(nSp,1);
-                        %resLum(jSp,kStepLum,kStep).BM = XlumCur;
-                        %resLum(jSp,kStepLum,kStep).vBM = zeros(nSp,1);
                     else
                         %feasible case
                         dXlum(jSp) = resLum(jSp,kStepLum,kStep).vBM(jSp) * dtLum;
                     end
                     if any(isnan(resLum(jSp,kStepLum,kStep).vBM))
-                        if isfield(options,'nCR')
-                            error('c:%d, r:%d\tNaN 1!',options.nCR(1),options.nCR(2));
-                        else
-                            error('NaN!');
-                        end
+                        error('Sim #%d: Error in predicting growth in the luminal microbiota!', nSim);
                     end
-                    %update metabolite levels
+                    % update concentration vector due to exchanges by the luminal microbiota
                     C = C + (resLum(jSp,kStepLum,kStep).Ex - resLum(jSp,kStepLum,kStep).Ut) * dtLum;
                     C(O2) = 10000;
-                    %Ensure non-negative values with minimum threshold to avoid too
-                    %many small steps caused by them
+                    % ensure non-negative values with minimum threshold to avoid too
+                    % many small steps caused by them
                     C(C < tol) = 0;
                     o2consume = o2consume + resLum(jSp,kStepLum,kStep).Ut(O2) - resLum(jSp,kStepLum,kStep).Ex(O2);
                 else
@@ -497,76 +385,40 @@ for j = j0:nSect
                     resLum(jSp,kStepLum,kStep).vBM = zeros(nSp,1);
                 end
             end
-           
+            % store the actual oxygen uptake
             o2utLum(2,kStepLum,kStep) = o2consume;
-            %amount of O2 available to the luminal community in each region
-            weight = o2ProfileCur .* Volume(:,j) .* ratioLumCom(:,j);
-            if any(weight)
-                %as a normalized weight with unit sum
-                weight = weight/ sum(weight);
-            end
-            %to approximate the change in O2 concentration caused by
-            %consumption of O2 by the luminal community, assuming a
-            %decrease in O2 level proportional to the total O2 level in a
-            %region
-            o2concChangeByLum = o2consume * weight ./ Volume(:,j) / Len(j) * 1e6;
             
-            %increase in luminal biomass = growth + detechment from mucosal
-            %community (assume constant biomass of mucosal community,
-            %detech = growth)
-            if any(isnan(XmucCur * resMuc(kStep).GRmax * dtLum))
-                if isfield(options,'nCR')
-                    error('c:%d, r:%d\tNaN 2!',options.nCR(1),options.nCR(2));
-                else
-                    error('NaN!');
-                end
-            end
+            % increase in luminal biomass = growth + detechment from mucosal community 
+            % assuming constant biomass of mucosal community in which detech = growth
             XlumCur = XlumCur + XmucCur * resMuc(kStep).GRmax * dtLum + dXlum;
-            %for jSp = 1:nSp
-            %    XlumCur = XlumCur + resLum(jSp,kStepLum,kStep).vBM * dtLum ;
-            %end
             XlumCur(XlumCur < 0) = 0;
-        
-            %tOxy = tLum;
-            %kStepOxy = 1;
-            %timeOxy(kStepOxy,kStepLum,kStep) = tOxy;
-            %o2Lum(kStepOxy,kStepLum,kStep) = o2LumCur;
-            %only record the end points of oxygen diffusion
-            %o2Profile(:,kStepLum,kStep) = o2ProfileCur;
-            %o2Profile(:,kStepOxy,kStepLum,kStep) = o2ProfileCur;
-            %oxygen diffusion must be calculated at much smaller time steps (as
-            %we are using forward Euler, [should implement implicit method])
             
-            
+            % update time and step
             if kStepLum >= nStepLum
                 break
             end
             tLum = tLum + dtLum;
             kStepLum = kStepLum + 1;
             
+            % store time, concentration vector and luminal biomass composition
             timeLum(kStepLum,kStep) = tLum;
             Ct(:,kStepLum,kStep) = C;
             Xlum(:,kStepLum,kStep) = XlumCur;
         end
-        %print and save
         
+        % print after each large step
         t = t + dtMuc;
-        
-        fprintf('section %d . step %d . time %.1f\t%04d-%02d-%02d %02d:%02d:%02.0f\n',j,kTotal,t,clock);
+        fprintf('Sim #%d. Section %d. Step %d. time %.1f\t%04d-%02d-%02d %02d:%02d:%02.0f\n', nSim, j, kTotal, t, clock);
         nextJ = t >= maxT;
         if kStep == saveFre || nextJ
-            [j0,kSave0,kTotal0,kStep0] = deal(j,kSave,kTotal,kStep);
-            save(sprintf(['%s_sect%dsave%0' num2str(digit) 'd.mat'], ...
-                saveDsteady, j, kSave), ...
-                'time','o2Muc','SC','resMuc','fluxMuc', 'Xmuc', ... %muc level variables
-                't', 'nextJ',...
-                'timeLum','Xlum','Ct','resLum',... %lum level variables
-                'XlumCur','C', ... %lum level current variables
-                ... %oxy level variables
-                'o2utLum', 'o2utMuc', 'optOrder', ...
-                 ... %Oxy level current variables
-                'j0','kSave0','kStep0','kTotal0'); %counter
-            fprintf('section #%d . save #%d.\t%04d-%02d-%02d %02d:%02d:%02.0f\n',j,kSave,clock);
+            % save if new section or new save file
+            [j0, kSave0, kTotal0, kStep0] = deal(j, kSave, kTotal, kStep);
+            save(sprintf(['%s_sect%dsave%0' num2str(digit) 'd.mat'], saveName, j, kSave), ...
+                'time', 'scSolve', 'scFinish', 'resMuc','fluxMuc', 'Xmuc', 'o2utMuc', ...  % muc-level variables
+                'timeLum', 'Xlum', 'Ct', 'resLum', 'optOrder', 'XlumCur', 'o2utLum', ...  % lum-level variables
+                't', 'nextJ', 'C', ...  % variables across sections
+                'j0', 'kSave0', 'kStep0', 'kTotal0'); %counter
+            fprintf('Sim #%d. Section #%d. Save #%d.\t%04d-%02d-%02d %02d:%02d:%02.0f\n', nSim, j, kSave, clock);
             kSave = kSave + 1;
             kStep = 0;
         end
@@ -577,37 +429,335 @@ for j = j0:nSect
             break
         end
         kStep = kStep + 1;
-        [time(kStep),o2Muc(kStep)] = deal(t,o2MucCur);
+        time(kStep) = t;
     end
 end
 toc(tReal);
 end
 
+function [sol, result] = optimizeCbModelFixBm(modelCom, BMfix, minNorm, solverParam)
+% [sol, result] = optimizeCbModelFixBm(modelCom, BMfix, minNorm, solverParam)
+% maximize the sum of indiviudal growth rates given the biomass (or relative abundance) of each individual organism.
+%
+% INPUT:
+%    modelCom:       A community COBRA model structure with the following fields (created using `createMultipleSpeciesModel`)
+%                    (the first 5 fields are required, at least one of the last two is needed. Can be obtained using `getMultiSpecisModelId`):
+%
+%                      * S - Stoichiometric matrix
+%                      * b - Right hand side
+%                      * c - Objective coefficients
+%                      * lb - Lower bounds
+%                      * ub - Upper bounds
+%                      * infoCom - structure containing community reaction info
+%                      * indCom - the index structure corresponding to `infoCom`
+%
+%    BMfix           biomass amount/relative abundance for each organism
+%    minNorm         minimize the sum of absolute flux or not, default 0
+%
+% OUTPUT
+%    sol:            solveCobraLP solution structure
+%    result:         structure with the following fields:
+%                      * GRmax - maximum specific growth rate found (/h)
+%                      * vBM - biomass formation rate (gdw/h)
+%                      * BM - Biomass vector at GRmax (gdw)
+%                      * Ut - uptake fluxes (mmol/h)
+%                      * Ex - export fluxes (mmol/h)
+%                      * flux - flux distribution for the original model
+%    stat:           status at the termination of the algorithm
+%                      * 'infeasible' - infeasible model (e.g., not satisfying maintenance requirement)
+%                      * 'optimal' - optimal growth rate found
 
-function o2Flux = oxygenDiffusion(o2Profile, R, D)
-%o2Profile = oxygenDiffusion(o2Profile, R, D)
-%calculate the O2 diffusion flux given the concentration profile
-%from 0 to R, diffusion coefficent D
-L = numel(o2Profile);
-dr = R/L;
-% r = ((1:L)' - 0.5) * dr;
-o2Flux = zeros(L,1);
-for j = 1:L
-    if j == 1
-        [c1,c2,c3] = deal(o2Profile(j),o2Profile(j),o2Profile(j+1));
-    elseif j == L
-        [c1,c2,c3] = deal(o2Profile(j-1),o2Profile(j),o2Profile(j));
+%% Initialization
+nSp = numel(modelCom.infoCom.spAbbr); %number of species
+if ~exist('BMfix', 'var')
+    BMfix = ones(nSp, 1);
+end
+if ~exist('minNorm', 'var')
+    minNorm = 0;
+end
+if ~exist('solverParam', 'var')
+    solverParam = struct();
+end
+[m, n] = size(modelCom.S);
+
+%% Construct LP 
+
+[feasTol, ~] = getCobraSolverParams('LP',{'feasTol'; 'optTol'}, solverParam);
+
+if ~isfield(modelCom, 'csense')
+    cs = char('E' * ones(1, m));
+else 
+    cs = modelCom.csense(:)';
+end
+LP = struct();
+LP.A = modelCom.S;
+LP.b = modelCom.b;
+LP.c = modelCom.c;
+lbBM = modelCom.lb;
+ubBM = modelCom.ub;
+for jSp = 1:nSp
+    % LB^k_j * X^k <= V^k_j
+    lbBM(modelCom.indCom.rxnSps == jSp) = lbBM(modelCom.indCom.rxnSps == jSp) * BMfix(jSp);
+    % UB^k_j * X^k >= V^k_j
+    ubBM(modelCom.indCom.rxnSps == jSp) = ubBM(modelCom.indCom.rxnSps == jSp) * BMfix(jSp);
+end
+LP.lb = lbBM;
+LP.ub = ubBM;
+LP.osense = -1;
+LP.csense = cs;
+
+sol = solveCobraLP(LP, solverParam);
+
+result = struct();
+[result.GRmax, result.vBM, result.BM, result.Ut, result.Ex, result.flux, ...
+    result.iter0, result.iter, result.stat] = deal([]);
+
+% check the feasibility of the solution manually
+if sol.stat ~= 1
+    result.stat = 'infeasible';
+    return
+end
+GRmax = sol.full(modelCom.indCom.spBm);
+GRmax(BMfix > 0) = GRmax(BMfix > 0) ./ BMfix(BMfix > 0);
+result.GRmax = GRmax;
+result.vBM = sol.full(modelCom.indCom.spBm);
+result.BM = BMfix;
+result.Ut = sol.full(modelCom.indCom.EXcom(:,1));
+result.Ex = sol.full(modelCom.indCom.EXcom(:,2));
+result.flux = sol.full(1:n);
+result.iter0 = [];
+result.iter = [];
+result.stat = 'optimal';
+  
+if isscalar(minNorm) && minNorm == 1
+    sol.full(modelCom.indCom.spBm(sol.full(modelCom.indCom.spBm) < 0)) = 0;
+    fval = LP.c(:)' * sol.full;
+    LP.A = [LP.A,                      sparse(m, n); ...  % Sv = 0
+            LP.c(:)',                  sparse(1, n); ...  % c'v >= fval
+            sparse(1:n, 1:n, 1, n, n), sparse(1:n, 1:n, -1, n, n); ...  % v <= |v|
+            sparse(1:n, 1:n, -1, n, n), sparse(1:n, 1:n, -1, n, n)];  % -v <= |v|
+    LP.b = [LP.b; fval * (1 - feasTol * 10); zeros(2 * n, 1)];
+    LP.c(:) = 0;
+    LP.lb = [LP.lb; zeros(n, 1)];
+    LP.ub = [LP.ub; 1000 * ones(n ,1)];
+    LP.csense = [LP.csense(:)', 'G', repmat('L', 1, 2 * n)];
+    LP.osense = 1;
+    sol = solveCobraLP(LP, solverParam);
+    if sol.stat ~= 1
+        result.stat = 'optimal but unable to minimize total absolute flux';
     else
-        [c1,c2,c3] = deal(o2Profile(j-1),o2Profile(j),o2Profile(j+1));
+        result.GRmax = GRmax;
+        result.vBM = sol.full(modelCom.indCom.spBm);
+        result.BM = BMfix;
+        result.Ut = sol.full(modelCom.indCom.EXcom(:,1));
+        result.Ex = sol.full(modelCom.indCom.EXcom(:,2));
+        result.flux = sol.full(1:n);
     end
-    %     o2Flux(j) = (D/r(j)/(dr^2)) * ((r(j) - (dr/2)) * c1 - (2 * r(j) * c2) ...
-    %         + (r(j) + (dr/2)) * c3);
-    o2Flux(j) = (D/(dr^2)) * (c1 - 2*c2 + c3 + (c3-c1)/(2*j-1));
+end
+end
+
+function [sol, result] = optimizeCbModelFixGr(modelCom, options, solverParam)
+% [sol, result] = optimizeCbModelFixGr(modelCom, options, solverParam)
+% Find maximum sum of biomass of the community given a steady-state growth rate
+%
+% INPUT:
+%    modelCom:       A community COBRA model structure with the following fields (created using `createMultipleSpeciesModel`)
+%                    (the first 5 fields are required, at least one of the last two is needed. Can be obtained using `getMultiSpecisModelId`):
+%
+%                      * S - Stoichiometric matrix
+%                      * b - Right hand side
+%                      * c - Objective coefficients
+%                      * lb - Lower bounds
+%                      * ub - Upper bounds
+%                      * infoCom - structure containing community reaction info
+%                      * indCom - the index structure corresponding to `infoCom`
+%
+% options (optional)   struct with the following possible fields:
+%     GR              Fixed growth rate for the community
+%     BMcon           Biomass constraint matrix (sum(a_ij * X_j) </=/> b_i)
+%                      (given as K x N_species matrix for K constraints)
+%                      e.g. [0 1 1 0] for X_2 + X_3 in a 4-species model
+%     BMrhs           RHS for BMcon, K x 1 vector for K constraints
+%     BMcsense        Sense of the constraint, 'L', 'E', 'G' for <=, =, >=
+%     minNorm         Same as minNorm in optimizeCbModel, default 0
+%
+% OUTPUT
+%    sol:            solveCobraLP solution structure
+%    result:         structure with the following fields:
+%                      * GRmax - maximum specific growth rate found (/h)
+%                      * vBM - biomass formation rate (gdw/h)
+%                      * BM - Biomass vector at GRmax (gdw)
+%                      * Ut - uptake fluxes (mmol/h)
+%                      * Ex - export fluxes (mmol/h)
+%                      * flux - flux distribution for the original model
+%    stat:           status at the termination of the algorithm
+%                      * 'optimal' - optimal growth rate found
+%                      * 'infeasible' - infeasible model (should not happen)
+
+%% Initialization
+
+%get paramters
+if ~exist('options', 'var')
+    options = struct();
+end
+if ~exist('solverParam', 'var')
+    solverParam = struct();
+end
+[GR, BMcon, BMrhs, BMcsense, BMgdw, minNorm] = getSpatialGutParams(...
+    {'GR', 'BMcon', 'BMrhs', 'BMcsense', 'BMgdw', 'minNorm'}, options, modelCom);
+
+[~, n] = size(modelCom.S);
+nRxnSp = sum(modelCom.rxnSps > 0); %number of species-specific rxns
+nSp = numel(modelCom.infoCom.spAbbr); %number of species
+
+%% Construct LP 
+% upper bound matrix
+S_ub = sparse([1:nRxnSp 1:nRxnSp]', [(1:nRxnSp)'; n + modelCom.indCom.rxnSps(1:nRxnSp)],...
+    [ones(nRxnSp,1); -modelCom.ub(1:nRxnSp)], nRxnSp, n + nSp);
+% lower bound matrix
+S_lb = sparse([1:nRxnSp 1:nRxnSp]', [(1:nRxnSp)'; n + modelCom.indCom.rxnSps(1:nRxnSp)],...
+    [-ones(nRxnSp,1); modelCom.lb(1:nRxnSp)], nRxnSp, n + nSp);
+%growth rate and biomass link matrix
+grSp = GR * ones(nSp, 1);
+S_gr = sparse([1:nSp 1:nSp]', [modelCom.indCom.spBm(:) (n + 1:n + nSp)'],...
+    [BMgdw(:); -grSp], nSp, n + nSp);
+if isempty(BMcon)
+    A = [modelCom.S sparse([],[],[], m, nSp); S_ub; S_lb; S_gr];
+else
+    A = [modelCom.S sparse([],[],[], m, nSp); S_ub; S_lb; S_gr;...
+        sparse([],[],[],size(BMcon, 1), n) BMcon];
+end
+LP = struct();
+LP.A = A;
+LP.b = [modelCom.b; zeros(2 * nRxnSp + nSp, 1)]; 
+if ~isempty(BMcon)
+    LP.b = [LP.b; BMrhs];
+end
+LP.c = zeros(n + nSp, 1);
+LP.c(modelCom.indCom.spBm) = 1;
+% organism-specific fluxes bounded by biomass variable but not by constant
+LP.lb = -inf(nRxnSp, 1);
+LP.lb(modelCom.lb(1:nRxnSp) >= 0) = 0;
+LP.lb = [LP.lb; modelCom.lb((nRxnSp + 1): n); zeros(nSp, 1)];
+% biomass upper bound should also be arbitrarily large, but set as 1000 here
+LP.ub = inf(nRxnSp, 1);
+LP.ub(modelCom.ub(1:nRxnSp)<=0) = 0;
+LP.ub = [LP.ub; modelCom.ub((nRxnSp + 1): n); 1000 * ones(nSp, 1)];
+%handle constraint sense
+if ~isfield(modelCom, 'csense')
+    LP.csense = char(['E' * ones(1, m) 'L' * ones(1, 2 * nRxnSp) 'E' * ones(1, nSp) BMcsense(:)']);
+else
+    LP.csense = [modelCom.csense(:)' char(['L' * ones(1, 2 * nRxnSp) 'E' * ones(1, nSp) BMcsense(:)'])];
+end
+LP.osense = -1;
+
+[feasTol, ~] = getCobraSolverParams('LP',{'feasTol'; 'optTol'}, solverParam);
+
+result = struct();
+[result.GRmax, result.vBM, result.BM, result.Ut, result.Ex, ...
+    result.flux, result.iter0, result.iter] = deal([]);
+
+sol = solveCobraLP(LP, solverParam);
+if sol.stat ~= 1
+    result.stat = 'infeasible';
+    return
+end
+GRmax = sol.full(modelCom.indCom.spBm);
+GRmax(BMfix > 0) = GRmax(BMfix > 0) ./ BMfix(BMfix > 0);
+result.GRmax = GRmax;
+result.vBM = sol.full(modelCom.indCom.spBm);
+result.BM = BMfix;
+result.Ut = sol.full(modelCom.indCom.EXcom(:,1));
+result.Ex = sol.full(modelCom.indCom.EXcom(:,2));
+result.flux = sol.full(1:n);
+result.iter0 = [];
+result.iter = [];
+result.stat = 'optimal';
+  
+if isscalar(minNorm) && minNorm == 1
+    sol.full(modelCom.indCom.spBm(sol.full(modelCom.indCom.spBm) < 0)) = 0;
+    fval = LP.c(:)' * sol.full;
+    LP.A = [LP.A,                             sparse(m, n); ...  % original constraints
+            LP.c(:)',                         sparse(1, n); ...  % c'v >= fval
+            sparse(1:n, 1:n, 1, n, n + nSp),  sparse(1:n, 1:n, -1, n, n); ...  % v <= |v|
+            sparse(1:n, 1:n, -1, n, n + nSp), sparse(1:n, 1:n, -1, n, n)];  % -v <= |v|
+    LP.b = [LP.b; fval * (1 - feasTol * 10); zeros(2 * n, 1)];
+    LP.c(:) = 0;
+    LP.lb = [LP.lb; zeros(n, 1)];
+    LP.ub = [LP.ub; 1000 * ones(n ,1)];
+    LP.csense = [LP.csense(:)', 'G', repmat('L', 1, 2 * n)];
+    LP.osense = 1;
+    sol = solveCobraLP(LP, solverParam);
+    if sol.stat ~= 1
+        result.stat = 'optimal but unable to minimize total absolute flux';
+    else
+        result.GRmax = GRmax;
+        result.vBM = sol.full(modelCom.indCom.spBm);
+        result.BM = BMfix;
+        result.Ut = sol.full(modelCom.indCom.EXcom(:,1));
+        result.Ex = sol.full(modelCom.indCom.EXcom(:,2));
+        result.flux = sol.full(1:n);
+    end
 end
 
 end
 
+function varargout = getSpatialGutParams(param2get, options, modelCom)
+% get the required default parameters
+% [param_1, ..., param_N] = getSpatialGutParams({'param_1',...,'param_N'},options,modelCom)
+%
+% INPUT:
+%   'param_1',...,'param_N': parameter names
+%   options: option structure
+%            If the required parameter is a field in options, take from
+%            options. Otherwise, return the default value.
+%   modelCom: the community model for which parameters are constructed.
+   
+if nargin < 3
+    modelCom = struct('rxns',[]);
+    modelCom.infoCom.spAbbr = {};
+    modelCom.infoCom.rxnSps = {};
+end
+if nargin < 2 || isempty(options)
+    options = struct();
+end
+if ischar(param2get)
+    param2get = {param2get};
+end
 
+varargout = cell(numel(param2get), 1);
+for j = 1:numel(param2get)
+    if isfield(options, param2get{j})
+        %if provided in the call
+        varargout{j} = options.(param2get{j});
+    else
+        %use default if default exist and not provided
+        %return empty if no default
+        varargout{j} = paramDefault(param2get{j}, modelCom);
+    end
+end
+end
 
+function param = paramDefault(paramName,modelCom)
+% get default parameter values
+switch paramName
 
+    % parameters for spatialGut
+    case 'resultTmp',   param = struct('GRmax',[],'vBM',[],'BM',[],'Ut',[],...
+                                'Ex',[],'flux',[],'iter0',[],'iter',[],'stat','');  % result template
+    case 'dtMuc',       param = 0.5;
+    case 'dtLum',       param = 1 / 12;
+    case 'saveName',    param = 'spatialGutSim1';
+    case 'saveFre',     param = 21;
+    case 'O2Id',        param = 'o2[u]';
+    case 'nSim',        param = 1;
+        
+    %parameters for optimizeCbModelFixGr
+    case 'GR',          param = 0; % growth rate fixed
+    case 'BMgdw',       param = ones(numel(modelCom.infoCom.spAbbr), 1);  % relative molecular weight of biomass. For scaling the relative abundance
+    case 'minNorm',     param = 0;
+    
+    otherwise,          param = [];
+end
+end
 
