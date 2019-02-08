@@ -30,7 +30,7 @@ function spatialGut(model, options, solverParam)
 %         in the discretization scheme)
 %     saveName: filename for saving
 %     saveFre: steps per savefile
-%     O2Id: oxygen community metabolite ID (o2[u])
+%     o2Id: oxygen community metabolite ID (o2[u])
 %     O2d: nCond x 1 vector of oxygen diffusion coefficients between mucosal and
 %          luminal community (mm^2/hr)
 %     pO2: partial pressure of oxygen on the mucosa (which determines
@@ -60,9 +60,9 @@ function spatialGut(model, options, solverParam)
 %% Check inputs
 tReal = tic;
 tol = 1e-10;        
-[resultTmp, dtMuc, dtLum, C, T, X, saveName, saveFre, O2Id, O2fluxMuc, O2fluxLum, nSim] = ...
+[resultTmp, dtMuc, dtLum, C, T, X, saveName, saveFre, o2Id, o2fluxMuc, o2fluxLum, nSim] = ...
     getSpatialGutParams({'resultTmp','dtMuc','dtLum','C','T','X','saveName','saveFre', ...
-    'O2Id','O2fluxMuc','O2fluxLum','nSim'}, options, model);
+    'o2Id','o2fluxMuc','o2fluxLum','nSim'}, options, model);
 if nargin < 3
     solverParam = struct();
 end
@@ -74,7 +74,7 @@ if ~isempty(saveDir) && ~exist(saveDir, 'dir')
     mkdir(saveDir)
 end
 % check if necessary parameters are provided
-field = {'C', 'T', 'X', 'O2fluxMuc', 'O2fluxLum'};
+field = {'C', 'T', 'X', 'o2fluxMuc', 'o2fluxLum'};
 for j = 1:numel(field)
     if ~isfield(options,field{j})
         error('%s must be provided in the option structure.',field{j});
@@ -100,9 +100,10 @@ dtLum = dtMuc / ceil(dtMuc / dtLum);
 % number of simulations for the luminal microbiota per simulation for the mucosal microbiota
 nStepLum = round(dtMuc / dtLum);
 % index of O2 among the community metabolites
-O2 = find(strcmp(model.infoCom.Mcom, O2Id));
+O2 = find(strcmp(model.infoCom.Mcom, o2Id));
 % number of organisms in the community
-nSp = numel(model.sps);
+nSp = numel(model.infoCom.spAbbr);
+[m, n] = size(model.S);
 % solution structure for mucosal and luminal microbiota
 resMuc = repmat(resultTmp,1,saveFre);
 resLum = repmat(resultTmp,nSp,nStepLum,saveFre);
@@ -195,12 +196,12 @@ if j0 == 0
     j0 = 1;
     kSave0 = 1;
     nextJ = true;
-    SpRate = model.rxns(model.EXsp(model.EXsp~=0));
-    SpRateUt = model.lb(model.EXsp(model.EXsp~=0));
-    SpRateEx = model.ub(model.EXsp(model.EXsp~=0));
+    SpRate = model.rxns(model.indCom.EXsp(model.indCom.EXsp~=0));
+    SpRateUt = model.lb(model.indCom.EXsp(model.indCom.EXsp~=0));
+    SpRateEx = model.ub(model.indCom.EXsp(model.indCom.EXsp~=0));
     save(sprintf('%s_pre.mat', saveName), 'options','solverParam',...
         'SpRate', 'SpRateUt', 'SpRateEx', 'nStepLum', 'dtMuc', 'dtLum',...
-        'digit', 'Nstep', 'feasTol', 'tol', 'O2fluxMuc', 'O2fluxLum');
+        'digit', 'Nstep', 'feasTol', 'tol', 'o2fluxMuc', 'o2fluxLum');
     clear SpRate SpRateUt SpRateEx
 end
 
@@ -230,16 +231,16 @@ for j = j0:nSect
     
     while true
         % store the O2 uptake bound
-        o2utMuc(1,kStep) = O2fluxMuc(j);
+        o2utMuc(1,kStep) = o2fluxMuc(j);
         % community uptake bounds for the mucosal microbiota
         ubMucCur = min(10000 * ones(nCom, 1), C./dtMuc);
         % 
-        ubMucCur(O2) = O2fluxMuc(j);
+        ubMucCur(O2) = o2fluxMuc(j);
         ubMucCur(ubMucCur < feasTol) = 0; %may cause numerical problem for such small ub
         % difference in uptake bounds
         ubDiff = abs(ubMucCur - ubMucPrev);
         if ~(isequal(ubMucCur ~= 0, ubMucPrev ~= 0)) || sum(ubDiff(ubMucPrev ~= 0) ./ ubMucPrev(ubMucPrev ~= 0)) > 0.01
-            model.ub(model.EXcom(:,1)) = ubMucCur;
+            model.ub(model.indCom.EXcom(:,1)) = ubMucCur;
             % there are differences. Solve SteadyCom
             scSolve(kStep) = true;
             [~, resMuc(kStep)] = SteadyCom(model, optionsMuc, solverParam);
@@ -247,7 +248,7 @@ for j = j0:nSect
                 scFinish(kStep) = false;
                 resMuc(kStep).Ex = zeros(nCom,1);
                 resMuc(kStep).Ut = zeros(nCom,1);
-                resMuc(kStep).GRmax = zeros(nSp,1);
+                resMuc(kStep).GRmax = 0;
                 resMuc(kStep).BM = zeros(nSp,1);
                 resMuc(kStep).vBM = zeros(nSp,1);
                 resMuc(kStep).flux = zeros(n,1);
@@ -288,7 +289,7 @@ for j = j0:nSect
             end
         end
         
-        if any(isnan(XmucCur * resMuc(kStep).GRmax * dtLum))
+        if any(isnan(XmucCur .* resMuc(kStep).GRmax * dtLum))
             error('Sim #%d: Error in predicting growth in the mucosal microbiota!', nSim);
         end
         
@@ -297,9 +298,9 @@ for j = j0:nSect
         % store the mucosal biomass composition
         Xmuc(:,kStep) = XmucCur;
         % store the actual oxygen uptake by the mucosal microbiota
-        o2utMuc(2,kStep) = fluxMuc(model.EXcom(O2,1),kStep) - fluxMuc(model.EXcom(O2,2),kStep);
+        o2utMuc(2,kStep) = fluxMuc(model.indCom.EXcom(O2,1),kStep) - fluxMuc(model.indCom.EXcom(O2,2),kStep);
         % concentration change vector. Actuate in each dtLum step
-        C_changeByMuc = fluxMuc(model.EXcom(:,2),kStep) - fluxMuc(model.EXcom(:,1),kStep);
+        C_changeByMuc = fluxMuc(model.indCom.EXcom(:,2),kStep) - fluxMuc(model.indCom.EXcom(:,1),kStep);
         C_changeByMuc(O2) = 0;
         % Concentration vector after exchanges by the mucosal microbiota.
         % Use linear change because the biomass of mucosal community is constant
@@ -318,7 +319,7 @@ for j = j0:nSect
         
         while true
             % oxygen uptake bounds
-            o2utLum(1,kStepLum,kStep) = O2fluxLum(j);
+            o2utLum(1,kStepLum,kStep) = o2fluxLum(j);
             % random order for the organisms in running DMMM
             optOrder(:,kStepLum,kStep) = randperm(nSp)';
             % O2 consumed by the luminal community
@@ -334,9 +335,9 @@ for j = j0:nSect
                     % shut down other members
                     modelJ = killSpecies(model, setdiff(1:nSp, jSp));
                     % uptake bounds
-                    modelJ.ub(modelJ.EXcom(:, 1)) = min([10000 * ones(nCom, 1), C / dtLum, Cmuc / dtLum], [], 2);
-                    modelJ.ub(model.EXcom(O2, 1)) = O2fluxLum(j);
-                    modelJ.ub(modelJ.EXcom(modelJ.ub(modelJ.EXcom(:, 1)) < feasTol, 1)) = 0;
+                    modelJ.ub(modelJ.indCom.EXcom(:, 1)) = min([10000 * ones(nCom, 1), C / dtLum, Cmuc / dtLum], [], 2);
+                    modelJ.ub(model.indCom.EXcom(O2, 1)) = o2fluxLum(j);
+                    modelJ.ub(modelJ.indCom.EXcom(modelJ.ub(modelJ.indCom.EXcom(:, 1)) < feasTol, 1)) = 0;
                     [~, resLum(jSp, kStepLum, kStep)] = optimizeCbModelFixBm(modelJ, XlumCur, 1, solverParam);
                     if strcmp(resLum(jSp,kStepLum,kStep).stat,'infeasible')
                         dying(jSp,kStepLum,kStep) = true;
@@ -537,7 +538,7 @@ if isscalar(minNorm) && minNorm == 1
             sparse(1:n, 1:n, 1, n, n), sparse(1:n, 1:n, -1, n, n); ...  % v <= |v|
             sparse(1:n, 1:n, -1, n, n), sparse(1:n, 1:n, -1, n, n)];  % -v <= |v|
     LP.b = [LP.b; fval * (1 - feasTol * 10); zeros(2 * n, 1)];
-    LP.c(:) = 0;
+    LP.c = zeros(n * 2, 1);
     LP.lb = [LP.lb; zeros(n, 1)];
     LP.ub = [LP.ub; 1000 * ones(n ,1)];
     LP.csense = [LP.csense(:)', 'G', repmat('L', 1, 2 * n)];
@@ -749,7 +750,7 @@ switch paramName
     case 'dtLum',       param = 1 / 12;
     case 'saveName',    param = 'spatialGutSim1';
     case 'saveFre',     param = 21;
-    case 'O2Id',        param = 'o2[u]';
+    case 'o2Id',        param = 'o2[u]';
     case 'nSim',        param = 1;
         
     %parameters for optimizeCbModelFixGr
