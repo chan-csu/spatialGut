@@ -50,6 +50,8 @@ o2spRate = [0 0 0 2 2];
 % avoid magnitude close to tolerance level by scaling up substrate available and biomass density of the community
 scalingFactor = 1000;
 
+parallel = 2;
+
 options = struct();
 options.X = XmucExp * scalingFactor;
 % oxygen available to the mucosal microbiota in each section
@@ -63,9 +65,9 @@ options.C = zeros(numel(model5.infoCom.Mcom), 1);
 options.C(yn) = cell2mat(chowDiet(id(yn), 2)) * scalingFactor;
 
 % oxygen met ID
-options.o2 = 'o2[u]';
+options.o2Id = 'o2[u]';
 % index of oxygen among community metabolites
-o2indCom = strcmp(model5.infoCom.Mcom, options.o2);
+o2indCom = strcmp(model5.infoCom.Mcom, options.o2Id);
 % oxygen balance is not accounted. Oxygen availability is controlled by other parameters
 options.C(o2indCom) = 0.00; 
 
@@ -125,6 +127,9 @@ if ~exist('parallel', 'var') || parallel == 0
     end
 else
     % parallel computation
+    if isempty(gcp('nocreate'))
+        parpool;
+    end
     parfor j = 1:numel(simId)
         optionsJ = options;
         optionsJ.nSim = simId(j);

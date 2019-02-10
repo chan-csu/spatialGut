@@ -1,68 +1,44 @@
 function spatialGut(model, options, solverParam)
-% finish = spatialGut(model, options, solverParam)
-%***Simplify the diffusion process into simple oxygen flux proportional to
-%surface area and diffusion coefficients
-%Steady state for mucosal community and meanwhile dynamic change for
-%luminal community. (SteadyCom for mucosal community, dSteadyCom for 
-%luminal community and oxygen diffusion have all different time scales)
-%Input:
-%  model:    COBRA community model (template for all communities)
-%  options: structure with the following fields:
-%     C:  mCom x 2 x nCond array. c_ijk is the amount of metabolites (mmol) 
-%         for the i-th community metabolites in the mucsoal (j=1) or
-%         luminal (j=2) community under the k-th condition representing 
-%         a section of the intestines.
-%     X:  nCond x 1 vector of mucosal community biomass density (gdw/L) for various
-%         sections of the intestines. (e.g. 0.2 gdw/L)
-%     D:  nCond x 1 vector of the dilution rate of the mucosal community
-%         for various sections of the intestines (should proportional to
-%         the flow rate of luminal content/chyme). Either X or D must be
-%         supplied. Use X whenever X is suppled.
-%     T:  nCond x 1 vector of transit time for various sections of the intestines
-%     dt: small time step for dynamic simulation (1//60);
-%    Rmuc: thinkness of the mucosal community (for calculating
-%           cross-section area) (mm)
-%     R: radius of the intestines (for calculating volume) (mm)
-%     Len: length of the intestines (for calculating volume) (mm)
-%     L:   number of discretization step for calculating oxygen diffusion
-%        (oxygen available to each community calculated by summing the concentration
-%         multiplied by the volume occupied by the community over each region
-%         in the discretization scheme)
-%     saveName: filename for saving
-%     saveFre: steps per savefile
-%     o2Id: oxygen community metabolite ID (o2[u])
-%     O2d: nCond x 1 vector of oxygen diffusion coefficients between mucosal and
-%          luminal community (mm^2/hr)
-%     pO2: partial pressure of oxygen on the mucosa (which determines
-%          oxygen uptake rate) (atm)
-%     Kpc: partial pressure / molar concentration for O2 (619 atm / (mol/L))
-%     p2c: concentration of O2 per partial pressure (mmol/L / atm)
-%          (default 39.3)
-%     O2ut: oxygen uptake rate per partial pressure (assume propotional)
-%          (nSp x 1 vector)
-%     other fields for optimizeCbModelComCplexFixGr (optional)
+% spatialGut(model, options, solverParam)
+% 
+% Simulate the luminal and the mocusally adherent microbiota and their metabolism 
+% along the intestines using a community metabolic model. 
+% In each section, the luminal microbiota changes dynamically with time and grow 
+% while the mocusal microbiota is simulated at a community steady-state
+% where the newly grown cells are shed into the lumen and become luminal microbes.
+% No output for this function. Results are saved in a set of files. Use
+% plotSpatialGutResults.m to retrieve the data.
 %
-%  solverParam: Cplex solver parameter structure
+% INPUTS:
+%    model:      COBRA community model (template for all communities)
+%    options:    structure with the following fields:
+%                - parameters that must be supplied
+%                  * C - mCom-by-1 vector of the initial amounts of community metabolites 
+%                        entering into the first intestinal section array
+%                  * X - nSect-by-1 vector of mucosal community biomass for each section of the intestines
+%                  * T - nSect-by-1 vector of transit time for each section of the intestines
+%                  * o2fluxMuc - nSect-by-1 vector of oxygen community uptake bound for 
+%                                the mucosal microbiota in each section of the intestines
+%                  * o2fluxLum - nSect-by-1 vector of oxygen community uptake bound for 
+%                                the luminal microbiota in each section of the intestines
+%               - optional parameters
+%                  * dtMuc - time step for each consecutive simulation of the mucosal microbiota (0.5);
+%                  * dtLum - time step for each consecutive simulation of the luminal microbiota (1/12)
+%                  * o2Id - oxygen community metabolite ID (o2[u])
+%                  * nSim - the number of this simulation, for printing information only (1)
+%                  * saveDetail - true to save all details including fluxes, solutions and 
+%                                 concentration vectors at each step (false)
+%                  * saveName - filename for saving. Can include directory ('spatialGutSim/test') 
+%                  * saveFre - steps per savefile (21)
 %
-%Given the uptake rate in the k-th section, the mucosal community with
-%maximum biomass under a constant flow rate F(k) (as the diltuion rate) is
-%determined by SteadyCom. The mucosal community is thus modeled at a community 
-%steady state. During the time period T(k). The microbial mass from the mucosal
-%community is constantly dilute and becomes the mass in the luminal
-%community. The microbes in the luminal community deviate from the
-%community steady state since the uptake rate (oxygen availability) has
-%changed and evolve to a new steady state over time. The final luminal 
-%community in the k-th section becomes the initial community in the k+1-th
-%sections. This simulation assumes that the intestines is stable (like in
-%mature adults) such that colonization by new microbes into the mucosal
-%community is negligible.
+%    solverParam: COBRA solver parameters
 
 %% Check inputs
 tReal = tic;
 tol = 1e-10;        
-[resultTmp, dtMuc, dtLum, C, T, X, saveName, saveFre, o2Id, o2fluxMuc, o2fluxLum, nSim] = ...
+[resultTmp, dtMuc, dtLum, C, T, X, saveName, saveFre, o2Id, o2fluxMuc, o2fluxLum, nSim, saveDetail] = ...
     getSpatialGutParams({'resultTmp','dtMuc','dtLum','C','T','X','saveName','saveFre', ...
-    'o2Id','o2fluxMuc','o2fluxLum','nSim'}, options, model);
+    'o2Id','o2fluxMuc','o2fluxLum','nSim','saveDetail'}, options, model);
 if nargin < 3
     solverParam = struct();
 end
@@ -420,11 +396,19 @@ for j = j0:nSect
         if kStep == saveFre || nextJ
             % save if new section or new save file
             [j0, kSave0, kTotal0, kStep0] = deal(j, kSave, kTotal, kStep);
-            save(sprintf(['%s_sect%dsave%0' num2str(digit) 'd.mat'], saveName, j, kSave), ...
-                'time', 'scSolve', 'scFinish', 'resMuc','fluxMuc', 'Xmuc', 'o2utMuc', ...  % muc-level variables
-                'timeLum', 'Xlum', 'Ct', 'resLum', 'optOrder', 'XlumCur', 'o2utLum', ...  % lum-level variables
-                't', 'nextJ', 'C', 'finish', ...  % variables across sections
-                'j0', 'kSave0', 'kStep0', 'kTotal0'); %counter
+            if saveDetail
+                save(sprintf(['%s_sect%dsave%0' num2str(digit) 'd.mat'], saveName, j, kSave), ...
+                    'time', 'scSolve', 'scFinish', 'resMuc','fluxMuc', 'Xmuc', 'o2utMuc', ...  % muc-level variables
+                    'timeLum', 'Xlum', 'Ct', 'resLum', 'optOrder', 'XlumCur', 'o2utLum', ...  % lum-level variables
+                    't', 'nextJ', 'C', 'finish', ...  % variables across sections
+                    'j0', 'kSave0', 'kStep0', 'kTotal0'); %counter
+            else
+                save(sprintf(['%s_sect%dsave%0' num2str(digit) 'd.mat'], saveName, j, kSave), ...
+                    'time', 'scSolve', 'scFinish', 'Xmuc', 'o2utMuc', ...  % muc-level variables
+                    'timeLum', 'Xlum', 'optOrder', 'XlumCur', 'o2utLum', ...  % lum-level variables
+                    't', 'nextJ', 'C', 'finish', ...  % variables across sections
+                    'j0', 'kSave0', 'kStep0', 'kTotal0'); %counter
+            end
             fprintf('Sim #%d. Section #%d. Save #%d.\t%04d-%02d-%02d %02d:%02d:%02.0f\n', nSim, j, kSave, clock);
             kSave = kSave + 1;
             kStep = 0;
@@ -752,10 +736,11 @@ switch paramName
                                 'Ex',[],'flux',[],'iter0',[],'iter',[],'stat','');  % result template
     case 'dtMuc',       param = 0.5;
     case 'dtLum',       param = 1 / 12;
-    case 'saveName',    param = 'spatialGutSim1';
+    case 'saveName',    param = ['spatialGutSim' filesep ' test'];
     case 'saveFre',     param = 21;
     case 'o2Id',        param = 'o2[u]';
     case 'nSim',        param = 1;
+    case 'saveDetail',  param = false;
         
     %parameters for optimizeCbModelFixGr
     case 'GR',          param = 0; % growth rate fixed
