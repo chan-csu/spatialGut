@@ -128,6 +128,9 @@ dying = false(nSp, nStepLum, saveFre);
 scSolve = false(saveFre,1);
 scFinish = true(saveFre, 1);
 
+% whether the entire simulation has finished
+finish = false;
+
 %Variabile for the current step
 %nothing in the lumen initially
 XlumCur = zeros(nSp,1);
@@ -234,7 +237,7 @@ for j = j0:nSect
         o2utMuc(1,kStep) = o2fluxMuc(j);
         % community uptake bounds for the mucosal microbiota
         ubMucCur = min(10000 * ones(nCom, 1), C./dtMuc);
-        % 
+        %
         ubMucCur(O2) = o2fluxMuc(j);
         ubMucCur(ubMucCur < feasTol) = 0; %may cause numerical problem for such small ub
         % difference in uptake bounds
@@ -324,7 +327,7 @@ for j = j0:nSect
             optOrder(:,kStepLum,kStep) = randperm(nSp)';
             % O2 consumed by the luminal community
             o2consume = 0;
-            % update concentration vector due to exchanges by the mucosal community 
+            % update concentration vector due to exchanges by the mucosal community
             C = C + C_changeByMuc * dtLum;
             % increase in luminal microbial biomass
             dXlum = zeros(nSp,1);
@@ -353,7 +356,7 @@ for j = j0:nSect
                         resLum(jSp, kStepLum, kStep) = resFixGr;
                         if resLum(jSp, kStepLum, kStep).BM(jSp) > XlumCur(jSp)
                             resLum(jSp, kStepLum, kStep).flux = resLum(jSp, kStepLum, kStep).flux ...
-                                * XlumCur(jSp) / resLum(jSp,kStepLum,kStep).BM(jSp); 
+                                * XlumCur(jSp) / resLum(jSp,kStepLum,kStep).BM(jSp);
                             resLum(jSp,kStepLum,kStep).Ut = resLum(jSp,kStepLum,kStep).Ut ...
                                 * XlumCur(jSp) / resLum(jSp,kStepLum,kStep).BM(jSp);
                             resLum(jSp,kStepLum,kStep).Ex = resLum(jSp,kStepLum,kStep).Ex ...
@@ -389,7 +392,7 @@ for j = j0:nSect
             % store the actual oxygen uptake
             o2utLum(2,kStepLum,kStep) = o2consume;
             
-            % increase in luminal biomass = growth + detechment from mucosal community 
+            % increase in luminal biomass = growth + detechment from mucosal community
             % assuming constant biomass of mucosal community in which detech = growth
             XlumCur = XlumCur + XmucCur * resMuc(kStep).GRmax * dtLum + dXlum;
             XlumCur(XlumCur < 0) = 0;
@@ -411,13 +414,16 @@ for j = j0:nSect
         t = t + dtMuc;
         fprintf('Sim #%d. Section %d. Step %d. time %.1f\t%04d-%02d-%02d %02d:%02d:%02.0f\n', nSim, j, kTotal, t, clock);
         nextJ = t >= maxT;
+        if nextJ && j == nSect
+            finish = true;
+        end
         if kStep == saveFre || nextJ
             % save if new section or new save file
             [j0, kSave0, kTotal0, kStep0] = deal(j, kSave, kTotal, kStep);
             save(sprintf(['%s_sect%dsave%0' num2str(digit) 'd.mat'], saveName, j, kSave), ...
                 'time', 'scSolve', 'scFinish', 'resMuc','fluxMuc', 'Xmuc', 'o2utMuc', ...  % muc-level variables
                 'timeLum', 'Xlum', 'Ct', 'resLum', 'optOrder', 'XlumCur', 'o2utLum', ...  % lum-level variables
-                't', 'nextJ', 'C', ...  % variables across sections
+                't', 'nextJ', 'C', 'finish', ...  % variables across sections
                 'j0', 'kSave0', 'kStep0', 'kTotal0'); %counter
             fprintf('Sim #%d. Section #%d. Save #%d.\t%04d-%02d-%02d %02d:%02d:%02.0f\n', nSim, j, kSave, clock);
             kSave = kSave + 1;
@@ -607,8 +613,8 @@ end
 [GR, BMcon, BMrhs, BMcsense, BMgdw, minNorm] = getSpatialGutParams(...
     {'GR', 'BMcon', 'BMrhs', 'BMcsense', 'BMgdw', 'minNorm'}, options, modelCom);
 
-[~, n] = size(modelCom.S);
-nRxnSp = sum(modelCom.rxnSps > 0); %number of species-specific rxns
+[m, n] = size(modelCom.S);
+nRxnSp = sum(modelCom.indCom.rxnSps > 0); %number of species-specific rxns
 nSp = numel(modelCom.infoCom.spAbbr); %number of species
 
 %% Construct LP 
@@ -663,11 +669,9 @@ if sol.stat ~= 1
     result.stat = 'infeasible';
     return
 end
-GRmax = sol.full(modelCom.indCom.spBm);
-GRmax(BMfix > 0) = GRmax(BMfix > 0) ./ BMfix(BMfix > 0);
-result.GRmax = GRmax;
+result.GRmax = GR;
 result.vBM = sol.full(modelCom.indCom.spBm);
-result.BM = BMfix;
+result.BM = sol.full((n + 1):(n + nSp));
 result.Ut = sol.full(modelCom.indCom.EXcom(:,1));
 result.Ex = sol.full(modelCom.indCom.EXcom(:,2));
 result.flux = sol.full(1:n);

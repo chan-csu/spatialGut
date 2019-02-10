@@ -19,7 +19,7 @@ if nargin == 0
     dataFile = 'simulationData.mat';
 end
 if nargin < 2
-    nSimulations = 3;
+    nSimulations = 100;
 end
 
 %% data needed from the dataFile
