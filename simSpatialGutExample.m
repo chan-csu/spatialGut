@@ -1,10 +1,11 @@
 function finish = simSpatialGutExample(dataFile, simIDs)
-% finish = simSpatialGutExample(dataFile, nSimulations)
+% Example of how to setup the parameters for spatialGut and how to call it
 %
-% Example setup of the parameters and call of spatialGut
+% USAGE:
+%    finish = simSpatialGutExample(dataFile, nSimulations)
 %
-% INPUTS:
-%    dataFile         .mat file containing the following variables:
+% OPTIONAL INPUTS:
+%    dataFile         .mat file containing the following variables  (default using the data in the paper)
 %              model:      a COBRA community model with *.infoCom and *.indCom. See getMultiSpeciesModelId.m 
 %              rxnEXsp:    a cell array of reaction IDs for the organism-community exchange reaction
 %                          whose uptake bounds are changed according to rxnEXspLBs in each simulation
@@ -12,7 +13,8 @@ function finish = simSpatialGutExample(dataFile, simIDs)
 %              diet:       cell array of nutrients available to the microbiota. 
 %                          1st column: community metabolite IDs
 %                          2nd column: available amount
-%    simIDs    index vector, simulations to perform using bounds in rxnEXspLBs(:, simIDs)
+%    simIDs           index vector, simulations to perform using bounds in 
+%                     rxnEXspLBs(:, simIDs) (default 1:100)
 %
 % OUTPUT:
 %    finish           true if all simulations have finished
@@ -21,7 +23,7 @@ if nargin == 0 || isempty(dataFile)
     dataFile = 'simulationData.mat';
 end
 if nargin < 2
-    simIDs = 1:200;
+    simIDs = 1:100;
 end
 
 %% data needed from the dataFile
@@ -76,7 +78,7 @@ options.C(o2indCom) = 0.00;
 % transit time in each intestinal section
 options.T = [2 2 2 3 3 3 3];
 % name for the files to be saved
-options.saveName = ['simSpatialGutExample' filesep 'default_params'];
+options.saveName = ['spatialGutExample2' filesep 'default_params'];
 
 % SteadyCom parameters
 options.algorithm = 2;

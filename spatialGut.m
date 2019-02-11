@@ -1,13 +1,14 @@
 function spatialGut(model, options, solverParam)
-% spatialGut(model, options, solverParam)
-% 
 % Simulate the luminal and the mocusally adherent microbiota and their metabolism 
 % along the intestines using a community metabolic model. 
 % In each section, the luminal microbiota changes dynamically with time and grow 
 % while the mocusal microbiota is simulated at a community steady-state
 % where the newly grown cells are shed into the lumen and become luminal microbes.
 % No output for this function. Results are saved in a set of files. Use
-% plotSpatialGutResults.m to retrieve the data.
+% plotSpatialGutResults.m to retrieve and plot the data.
+%
+% USAGE:
+%    spatialGut(model, options, solverParam)
 %
 % INPUTS:
 %    model:      COBRA community model (template for all communities)

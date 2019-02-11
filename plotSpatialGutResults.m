@@ -1,9 +1,11 @@
 function [data, dataMean, dataSD, finish, figHandle] = plotSpatialGutResults(saveName, simIDs, expData, expDataSD, T)
-% [data, dataMean, dataSD, finish, figHandle] = plotSpatialGutResults(saveName, simIDs, expData, expDataSD)
 % To retrieve and plot the results of spatialGut
 %
-% INPUTS:
-% (all optional, default using the partial data presented in the paper)
+% USAGE:
+%    [data, dataMean, dataSD, finish, figHandle] = plotSpatialGutResults(saveName, simIDs, expData, expDataSD)
+%
+% OPTIONAL INPUTS:
+%    (all optional, default using the partial data presented in the paper)
 %    saveName           the same saveName used in calling spatialGut to retrieve the data
 %    simIDs             an index vector for the simulations performed to retrieve and plot
 %    expData            structure containing the following experimental data:
@@ -19,12 +21,19 @@ function [data, dataMean, dataSD, finish, figHandle] = plotSpatialGutResults(sav
 %                                   in the lumen along the intestines
 %    expDataSD          struture with standard deviations corresponding to the data in expData
 %    T                  the retention time for each intestinal section used
+%
+% OUTPUTS:
+%    data               nSim-by-1 structure, each containing the results of one simuation
+%    dataMean           structure containing the meam for the data in 'data'
+%    dataSD             structure containing the standard deviation for the data in 'data'
+%    finish             nSim-by-1 logical vector, indicating whether each simulation is finished
+%    figHandle          structure containing the handles for all the figure-related objects for the plotted figure
 
 if nargin == 0 || isempty(saveName)
-    saveName = ['simSpatialGutExample' filesep 'default_params'];
+    saveName = ['spatialGutExample' filesep 'default_params'];
 end
 if nargin < 2 || isempty(simIDs)
-    simIDs = 1:200;
+    simIDs = 1:100;
 end
 if nargin < 3 || isempty(expData)
     d = load('experimentalData.mat');
