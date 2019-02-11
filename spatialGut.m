@@ -97,6 +97,9 @@ timeLum = zeros(nStepLum,saveFre);
 % biomass (relative abundance)
 Xmuc = zeros(nSp, saveFre);
 [Xlum,optOrder] = deal(zeros(nSp, nStepLum, saveFre));
+% growth rate
+GRmuc = zeros(saveFre, 1);
+GRlum = zeros(nSp, nStepLum, saveFre);
 % whether the species is dying (if it is not growing and cannot satisfy non-growth associated ATP maintenance
 dying = false(nSp, nStepLum, saveFre);
 
@@ -278,6 +281,8 @@ for j = j0:nSect
         Xmuc(:,kStep) = XmucCur;
         % store the actual oxygen uptake by the mucosal microbiota
         o2utMuc(2,kStep) = fluxMuc(model.indCom.EXcom(O2,1),kStep) - fluxMuc(model.indCom.EXcom(O2,2),kStep);
+        % store the community growth rate
+        GRmuc(kStep) = resMuc(kStep).GRmax;
         % concentration change vector. Actuate in each dtLum step
         C_changeByMuc = fluxMuc(model.indCom.EXcom(:,2),kStep) - fluxMuc(model.indCom.EXcom(:,1),kStep);
         C_changeByMuc(O2) = 0;
@@ -342,11 +347,12 @@ for j = j0:nSect
                         dXlum(jSp) = resLum(jSp,kStepLum,kStep).BM(jSp) - XlumCur(jSp);
                         if dXlum(jSp) > 1e-8
                             error('Sim #%d: Current amount of luminal biomass should be unsustainable.', nSim);
-                        end
+                        end                        
                     else
                         %feasible case
                         dXlum(jSp) = resLum(jSp,kStepLum,kStep).vBM(jSp) * dtLum;
                     end
+                    
                     if any(isnan(resLum(jSp,kStepLum,kStep).vBM))
                         error('Sim #%d: Error in predicting growth in the luminal microbiota!', nSim);
                     end
@@ -357,12 +363,14 @@ for j = j0:nSect
                     % many small steps caused by them
                     C(C < tol) = 0;
                     o2consume = o2consume + resLum(jSp,kStepLum,kStep).Ut(O2) - resLum(jSp,kStepLum,kStep).Ex(O2);
+                    GRlum(jSp, kStepLum, kStep) = resLum(jSp,kStepLum,kStep).GRmax(jSp);
                 else
                     resLum(jSp,kStepLum,kStep).Ex = zeros(nCom,1);
                     resLum(jSp,kStepLum,kStep).Ut = zeros(nCom,1);
                     resLum(jSp,kStepLum,kStep).GRmax = zeros(nSp,1);
                     resLum(jSp,kStepLum,kStep).BM = XlumCur;
                     resLum(jSp,kStepLum,kStep).vBM = zeros(nSp,1);
+                    GRlum(jSp, kStepLum, kStep) = 0;
                 end
             end
             % store the actual oxygen uptake
@@ -384,6 +392,7 @@ for j = j0:nSect
             timeLum(kStepLum,kStep) = tLum;
             Ct(:,kStepLum,kStep) = C;
             Xlum(:,kStepLum,kStep) = XlumCur;
+            
         end
         
         % print after each large step
@@ -404,8 +413,8 @@ for j = j0:nSect
                     'j0', 'kSave0', 'kStep0', 'kTotal0'); %counter
             else
                 save(sprintf(['%s_sect%dsave%0' num2str(digit) 'd.mat'], saveName, j, kSave), ...
-                    'time', 'scSolve', 'scFinish', 'Xmuc', 'o2utMuc', ...  % muc-level variables
-                    'timeLum', 'Xlum', 'optOrder', 'XlumCur', 'o2utLum', ...  % lum-level variables
+                    'time', 'scSolve', 'scFinish', 'Xmuc', 'o2utMuc', 'GRmuc', ...  % muc-level variables
+                    'timeLum', 'Xlum', 'optOrder', 'XlumCur', 'o2utLum', 'GRlum', ...  % lum-level variables
                     't', 'nextJ', 'C', 'finish', ...  % variables across sections
                     'j0', 'kSave0', 'kStep0', 'kTotal0'); %counter
             end

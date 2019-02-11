@@ -1,5 +1,7 @@
-function finish = simSpatialGutExample(dataFile, nSimulations)
+function finish = simSpatialGutExample(dataFile, simIDs)
 % finish = simSpatialGutExample(dataFile, nSimulations)
+%
+% Example setup of the parameters and call of spatialGut
 %
 % INPUTS:
 %    dataFile         .mat file containing the following variables:
@@ -10,16 +12,16 @@ function finish = simSpatialGutExample(dataFile, nSimulations)
 %              diet:       cell array of nutrients available to the microbiota. 
 %                          1st column: community metabolite IDs
 %                          2nd column: available amount
-%    nSimulations     number of simulations to perform using bounds in rxnEXspLBs(:, 1:nSimulations)
+%    simIDs    index vector, simulations to perform using bounds in rxnEXspLBs(:, simIDs)
 %
 % OUTPUT:
 %    finish           true if all simulations have finished
 
-if nargin == 0
+if nargin == 0 || isempty(dataFile)
     dataFile = 'simulationData.mat';
 end
 if nargin < 2
-    nSimulations = 100;
+    simIDs = 1:200;
 end
 
 %% data needed from the dataFile
@@ -50,7 +52,7 @@ o2spRate = [0 0 0 2 2];
 % avoid magnitude close to tolerance level by scaling up substrate available and biomass density of the community
 scalingFactor = 1000;
 
-parallel = 2;
+parallel = 0;
 
 options = struct();
 options.X = XmucExp * scalingFactor;
@@ -82,22 +84,25 @@ options.GRtol = 1e-4;
 options.GRguess = 0.2;
 options.verbFlag = 3;
 
+% the default 1e-9 tolerance tends to cause numerical instability in large
+% community models
+changeCobraSolverParams('LP', 'feasTol', 1e-8);
 solverParam = struct();
 
 % IDs for organism-community exchange reactions
 rxnEXspId = findRxnIDs(model5, rxnEXsp);
 
 % check previous progress
-undone = false(nSimulations, 1);
-for k = 1:nSimulations
-    if ~exist(sprintf('%s_sim%d_sect7save01.mat',options.saveName, k),'file')
+undone = false(numel(simIDs), 1);
+for k = 1:numel(simIDs)
+    if ~exist(sprintf('%s_sim%d_sect7save01.mat',options.saveName, simIDs(k)),'file')
         undone(k) = true;
     end
 end
 
 % check if all simulations have already been finished
 finish = true;
-if nnz(undone) == 0
+if ~any(undone)
     finish = true;
     fprintf('All %d simulations finished already\n', numel(options.nSim));
     return
@@ -106,23 +111,22 @@ elseif isfield(options,'infoOnly') && options.infoOnly
     finish = false;
     return
 end
-simId = find(undone);
-rxnEXspLBs = rxnEXspLBs(:, undone);
+simIDs = simIDs(undone);
 
 if ~exist('parallel', 'var') || parallel == 0
     % single thread computation
-    for j = 1:numel(simId)
+    for j = 1:numel(simIDs)
         optionsJ = options;
-        optionsJ.nSim = simId(j);
+        optionsJ.nSim = simIDs(j);
         fprintf('Sim #%d:\n', optionsJ.nSim);
         % assign bounds
         % (many random double numbers using all 16 digits seem to cause trouble to the solver)
-        model5.lb(rxnEXspId) = round(rxnEXspLBs(:, j), 4, 'significant');
+        model5.lb(rxnEXspId) = round(rxnEXspLBs(:, simIDs(j)), 4, 'significant');
         % members that have oxygen uptake reactions
         spWtO2 = model5.indCom.EXsp(o2indCom, :) > 0;
         % assign oxygen specific uptake rate assigned in the option
         model5.lb(model5.indCom.EXsp(o2indCom, spWtO2)) = -abs(o2spRate(spWtO2));
-        optionsJ.saveName = [optionsJ.saveName sprintf('_sim%d', simId(j))];
+        optionsJ.saveName = [optionsJ.saveName sprintf('_sim%d', simIDs(j))];
         spatialGut(model5, optionsJ, solverParam);
     end
 else
@@ -130,18 +134,18 @@ else
     if isempty(gcp('nocreate'))
         parpool;
     end
-    parfor j = 1:numel(simId)
+    parfor j = 1:numel(simIDs)
         optionsJ = options;
-        optionsJ.nSim = simId(j);
+        optionsJ.nSim = simIDs(j);
         fprintf('Sim #%d:\n', optionsJ.nSim);
         modelJ = model5;
         % assign bounds
         % (many random double numbers using all 16 digits seem to cause trouble to the solver)
-        modelJ.lb(rxnEXspId) = round(rxnEXspLBs(:, j), 4, 'significant');
+        modelJ.lb(rxnEXspId) = round(rxnEXspLBs(:, simIDs(j)), 4, 'significant');
         spWtO2 = modelJ.indCom.EXsp(o2indCom, :) > 0;
         % assign oxygen specific uptake rate assigned in the option
         modelJ.lb(modelJ.indCom.EXsp(o2indCom, spWtO2)) = -abs(o2spRate(spWtO2));
-        optionsJ.saveName = [optionsJ.saveName sprintf('_sim%d', simId(j))];
+        optionsJ.saveName = [optionsJ.saveName sprintf('_sim%d', simIDs(j))];
         spatialGut(modelJ, optionsJ, solverParam);
     end
 end

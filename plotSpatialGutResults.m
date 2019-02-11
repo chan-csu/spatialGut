@@ -1,12 +1,32 @@
-function [data, dataMean, dataSD, finish, figHandle] = plotSpatialGutResults(saveName, simIDs, expData, expDataSD)
+function [data, dataMean, dataSD, finish, figHandle] = plotSpatialGutResults(saveName, simIDs, expData, expDataSD, T)
+% [data, dataMean, dataSD, finish, figHandle] = plotSpatialGutResults(saveName, simIDs, expData, expDataSD)
+% To retrieve and plot the results of spatialGut
+%
+% INPUTS:
+% (all optional, default using the partial data presented in the paper)
+%    saveName           the same saveName used in calling spatialGut to retrieve the data
+%    simIDs             an index vector for the simulations performed to retrieve and plot
+%    expData            structure containing the following experimental data:
+%                       * AmucAero - nSect-by-1 vector, relative abundance of the aerobes 
+%                                    plus facultative anaerobes on the mucus layer
+%                       * AmucAnaero - nSect-by-1 vector, relative abundance of the strict
+%                                      anaerobes on the mucus layer
+%                       * AlumAero - nSect-by-1 vector, relative abundance of the aerobes 
+%                                    plus facultative anaerobes in the lumen
+%                       * AlumAnaero - nSect-by-1 vector, relative abundance of the strict
+%                                      anaerobes in the lumen
+%                       * XlumRel - nSect-by-1 vector, the relative microbial biomass level 
+%                                   in the lumen along the intestines
+%    expDataSD          struture with standard deviations corresponding to the data in expData
+%    T                  the retention time for each intestinal section used
 
-if nargin == 0
+if nargin == 0 || isempty(saveName)
     saveName = ['simSpatialGutExample' filesep 'default_params'];
 end
-if nargin < 2
-    simIDs = 1:100;
+if nargin < 2 || isempty(simIDs)
+    simIDs = 1:200;
 end
-if nargin < 3
+if nargin < 3 || isempty(expData)
     d = load('experimentalData.mat');
     expData = d.expData;
     expDataSD = d.expDataSD;
@@ -16,6 +36,14 @@ elseif nargin < 4
     for j = 1:numel(fn)
         expDataSD.(fn{j})(:) = 0;
     end
+end
+if nargin < 5 || isempty(T)
+    T0 = [2 2 2 3 3 3 3];
+    T = zeros(1,numel(T0));
+    for j = 1:numel(T)
+        T(j) = sum(T0(1:j));
+    end
+    T = [0 T];
 end
 
 % gather the data from saved files
@@ -27,12 +55,15 @@ dataMean.XlumSum = dataMean.XlumSum / SIPgm;
 dataSD.XlumSum = dataSD.XlumSum / SIPgm;
 
 % plot the results
-figHandle = plotSimVsExp(dataMean, dataSD, expData, expDataSD);
+figHandle = plotSimVsExp(dataMean, dataSD, expData, expDataSD, T);
 
 end
 
-function [data,dataMean,dataSD,finish] = getSpatialGutSimData(saveName, simIDs)
+function [data,dataMean,dataSD,finish] = getSpatialGutSimData(saveName, simIDs, aerobeIDs)
 
+if nargin < 3
+    aerobeIDs = 4:5;
+end
 field2get = {'time','timeLum','Xmuc','Xlum','resMuc','resLum','C','fluxMuc','GRmuc','GRlum','Alum','Amuc'};
 dataTemplate = struct();
 for k = 1:numel(field2get)
@@ -58,27 +89,42 @@ for i = 1:numel(simIDs)
               dataEachSim.Xmuc = [dataEachSim.Xmuc d.Xmuc(:, 1:d.kStep0)];
               s = size(d.Xlum);
               dataEachSim.Xlum = cat(2, dataEachSim.Xlum, reshape(d.Xlum(:, :, 1:d.kStep0), s(1), s(2) * d.kStep0));
-              dataEachSim.resMuc = [dataEachSim.resMuc d.resMuc(1:d.kStep0)];
-              dataEachSim.GRmuc = [dataEachSim.GRmuc [d.resMuc(1:d.kStep0).GRmax]];
-              s = d.resLum(:, 1:size(d.timeLum,1), 1:d.kStep0);
-              s = reshape(s, size(s, 1),size(s, 2) * size(s, 3));
-              dataEachSim.resLum = [dataEachSim.resLum s];
-              M = zeros(size(s));
-              for j = 1:size(s, 2)
-                  for jSp = 1:size(s, 1)
-                      if isequal(s(jSp, j).GRmax, 0)
-                          s(jSp, j).GRmax = zeros(size(s, 1), 1);
+              if isfield(d, 'resMuc')
+                  dataEachSim.resMuc = [dataEachSim.resMuc d.resMuc(1:d.kStep0)];                
+                  dataEachSim.GRmuc = [dataEachSim.GRmuc [d.resMuc(1:d.kStep0).GRmax]];
+              elseif isfield(d, 'GRmuc')
+                  dataEachSim.GRmuc = [dataEachSim.GRmuc, columnVector(d.GRmuc(1:d.kStep0))'];
+              end
+              
+              if isfield(d, 'resLum')
+                  s = d.resLum(:, 1:size(d.timeLum,1), 1:d.kStep0);
+                  s = reshape(s, size(s, 1),size(s, 2) * size(s, 3));
+                  dataEachSim.resLum = [dataEachSim.resLum s];
+                  M = zeros(size(s));
+                  for j = 1:size(s, 2)
+                      for jSp = 1:size(s, 1)
+                          if isequal(s(jSp, j).GRmax, 0)
+                              s(jSp, j).GRmax = zeros(size(s, 1), 1);
+                          end
+                      end
+                      a = [s(:,j).GRmax];
+                      if ~isempty(a)
+                          M(:,j) = sum(a,2);
                       end
                   end
-                  a = [s(:,j).GRmax];
-                  if ~isempty(a)
-                      M(:,j) = sum(a,2);
-                  end
+                  dataEachSim.GRlum = [dataEachSim.GRlum M];
+              elseif isfield(d, 'GRlum')
+                  s = d.GRlum(:, 1:size(d.timeLum,1), 1:d.kStep0);
+                  s = reshape(s, size(s, 1), size(s, 2) * size(s, 3));
+                  dataEachSim.GRlum = [dataEachSim.GRlum, s];
               end
-              dataEachSim.GRlum = [dataEachSim.GRlum M];
-              s = size(d.Ct);
-              dataEachSim.C = cat(2,dataEachSim.C,reshape(d.Ct(:,:,1:d.kStep0),s(1),s(2)*d.kStep0));
-              dataEachSim.fluxMuc = cat(2,dataEachSim.fluxMuc, d.fluxMuc(:,1:d.kStep0));
+              if isfield(d, 'Ct')
+                  s = size(d.Ct);
+                  dataEachSim.C = cat(2,dataEachSim.C,reshape(d.Ct(:,:,1:d.kStep0),s(1),s(2)*d.kStep0));
+              end
+              if isfield(d, 'fluxMuc')
+                  dataEachSim.fluxMuc = cat(2,dataEachSim.fluxMuc, d.fluxMuc(:,1:d.kStep0));
+              end
               if exist(sprintf(['%s_sect%dsave%0' num2str(d0.digit) 'd.mat'], saveNameI,k,j+1),'file')
                   j = j + 1;
               elseif exist(sprintf(['%s_sect%dsave%0' num2str(d0.digit) 'd.mat'], saveNameI,k+1,1),'file')
@@ -130,12 +176,12 @@ for k = 1:numel(field)
         dataSD.(field{k}) = std(dataK,0,3);
         switch field{k}
             case {'Amuc','Alum'}
-                dataMean.([field{k} 'Firm']) = mean(sum(dataK(2:3,:,:),1),3);
-                dataSD.([field{k} 'Firm']) = std(sum(dataK(2:3,:,:),1),0,3);
-                dataMean.([field{k} 'Anaero']) = mean(sum(dataK(1:3,:,:),1),3);
-                dataSD.([field{k} 'Anaero']) = std(sum(dataK(1:3,:,:),1),0,3);
-                dataMean.([field{k} 'Aero']) = mean(sum(dataK(4:5,:,:),1),3);
-                dataSD.([field{k} 'Aero']) = std(sum(dataK(4:5,:,:),1),0,3);
+                nSp = size(dataK, 1);
+                anaerobeIDs = setdiff(1:nSp, aerobeIDs);
+                dataMean.([field{k} 'Anaero']) = mean(sum(dataK(anaerobeIDs,:,:),1),3);
+                dataSD.([field{k} 'Anaero']) = std(sum(dataK(anaerobeIDs,:,:),1),0,3);
+                dataMean.([field{k} 'Aero']) = mean(sum(dataK(aerobeIDs,:,:),1),3);
+                dataSD.([field{k} 'Aero']) = std(sum(dataK(aerobeIDs,:,:),1),0,3);
             case 'Xlum'
                 dataMean.XlumSum = mean(sum(dataK,1),3);
                 dataSD.XlumSum = std(sum(dataK,1),0,3);
@@ -156,19 +202,12 @@ if nargin < 2
         end
     end
 end
-if nargin < 5 || isempty(T)
-    T0 = [2 2 2 3 3 3 3];
-    T = zeros(1,numel(T0));
-    for j = 1:numel(T)
-        T(j) = sum(T0(1:j));
-    end
-    T = [0 T];
-    meanT = (T(1:end-1)+T(2:end))/2;
-end
 row = 2;
 col = 3;
 figure('Position',  [1 249 831.5000 333]);
 linCol = [0    0.4470    0.7410; 0.8500 0.3250 0.0980];
+
+meanT = (T(1:end-1)+T(2:end))/2;
 
 % plot mucosal microbiota
 ax(1,1) = subplot(row,col,1);
@@ -270,23 +309,23 @@ if nargin > 2 && ~isempty(expData)
         end
     end
     %% Add experimental data points
-    dataPoint(1, 1) = errorbar(ax(1, 1), meanT, expData.abAero(:, 1), expDataSD.abAero(:, 1), 'o');
+    dataPoint(1, 1) = errorbar(ax(1, 1), meanT, expData.AmucAero, expDataSD.AmucAero, 'o');
     dataPoint(1, 1).Color = linCol(1,:);
     dataPoint(1, 1).MarkerSize = 6.5;
     
-    dataPoint(1, 2) = errorbar(ax(1, 1), meanT, expData.abAnaero(:, 1), expDataSD.abAnaero(:, 1), 'o');
+    dataPoint(1, 2) = errorbar(ax(1, 1), meanT, expData.AmucAnaero, expDataSD.AmucAnaero, 'o');
     dataPoint(1, 2).Color = linCol(2,:);
     dataPoint(1, 2).MarkerSize = 6.5;
     
-    dataPoint(2, 1) = errorbar(ax(1, 2), meanT, expData.abAero(:, 2), expDataSD.abAero(:, 2), 'o');
+    dataPoint(2, 1) = errorbar(ax(1, 2), meanT, expData.AlumAero, expDataSD.AlumAero, 'o');
     dataPoint(2, 1).Color = linCol(1,:);
     dataPoint(2, 1).MarkerSize = 6.5;
     
-    dataPoint(2, 2) = errorbar(ax(1, 2), meanT, expData.abAnaero(:, 2), expDataSD.abAnaero(:, 2), 'o');
+    dataPoint(2, 2) = errorbar(ax(1, 2), meanT, expData.AlumAnaero, expDataSD.AlumAnaero, 'o');
     dataPoint(2, 2).Color = linCol(2,:);
     dataPoint(2, 2).MarkerSize = 6.5;
     
-    dataPoint(3, 1) = plot(ax(1, 3), meanT, expData.XlumSumRel, 'o');
+    dataPoint(3, 1) = plot(ax(1, 3), meanT, expData.XlumRel, 'o');
     dataPoint(3, 1).Color = [0 0 0];
 end
 
