@@ -22,6 +22,6 @@ __Data files__
 
 __References__
 
-1. Chan SHJ, Senftle MN, Friedman ES, Wu GD, Maranas CD. Predicting the longitudinally and radially varying gut microbiota composition using multi-scale microbial metabolic modeling. Submitted.
+1. Chan SHJ, Friedman ES, Wu GD, Maranas CD. Predicting the longitudinally and radially varying gut microbiota composition using multi-scale microbial metabolic modeling. Submitted.
 
 2. Friedman ES, Bittinger K, Esipova T V., Hou L, Chau L, Jiang J, et al. Microbes vs. chemistry in the origin of the anaerobic gut lumen. Proc Natl Acad Sci. 2018;201718635. 
